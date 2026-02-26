@@ -1,5 +1,9 @@
 import tyro
 import mediapy
+import imageio_ffmpeg
+
+# Use bundled ffmpeg binary (avoids dependency on system ffmpeg)
+mediapy.set_ffmpeg(imageio_ffmpeg.get_ffmpeg_exe())
 
 # import wandb
 import tqdm

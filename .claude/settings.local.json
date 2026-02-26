@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(which uv:*)",
+      "Bash(uv:*)",
+      "Bash(~/.local/bin/uv:*)",
+      "Bash(/mmfs1/home/dg20/.local/bin/uv:*)",
+      "Bash(head:*)",
+      "Bash(sleep 30 && squeue -j 33470153 2>&1)",
+      "Bash(squeue:*)"
+    ]
+  }
+}

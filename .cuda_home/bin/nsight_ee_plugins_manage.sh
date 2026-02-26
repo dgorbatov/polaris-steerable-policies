@@ -1,0 +1,1 @@
+/sw/cuda/12.4.1/bin/nsight_ee_plugins_manage.sh

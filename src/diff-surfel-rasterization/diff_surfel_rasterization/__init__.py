@@ -30,10 +30,33 @@ except ImportError:
 
     def _load_extension_jit():
         """JIT compile the CUDA extension if pre-built version not available."""
+        import importlib.util
         from torch.utils.cpp_extension import load
 
+        # Build directory
+        cuda_ver = (
+            torch.version.cuda.replace(".", "_") if torch.cuda.is_available() else "cpu"
+        )
+        build_dir = os.path.join(
+            os.path.expanduser("~"),
+            ".cache",
+            "torch_extensions",
+            f"diff_surfel_rasterization_cu{cuda_ver}",
+        )
+        so_name = "diff_surfel_rasterization_cuda"
+        so_path = os.path.join(build_dir, f"{so_name}.so")
+
+        # If pre-compiled .so already exists, load it directly without
+        # re-triggering ninja (torch.utils.cpp_extension.load always re-runs
+        # ninja even when the .so is up-to-date, which requires nvcc).
+        if os.path.exists(so_path):
+            spec = importlib.util.spec_from_file_location(so_name, so_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+
+        # .so not found — compile via JIT (requires nvcc / CUDA_HOME)
         # Get source directory (parent of this __init__.py)
-        # _src_path = Path(__file__).parent.parent
         _src_path = Path(__file__).parent / "csrc"
 
         # Find all source files
@@ -67,42 +90,25 @@ except ImportError:
             str(_src_path.parent.parent / "third_party" / "glm"),
         ]
 
-        # Build directory
-        cuda_ver = (
-            torch.version.cuda.replace(".", "_") if torch.cuda.is_available() else "cpu"
-        )
-        build_dir = os.path.join(
-            os.path.expanduser("~"),
-            ".cache",
-            "torch_extensions",
-            f"diff_surfel_rasterization_cu{cuda_ver}",
-        )
-
-        # Create build directory if it doesn't exist
         os.makedirs(build_dir, exist_ok=True)
 
-        is_first_build = not os.path.exists(os.path.join(build_dir, "build.ninja"))
-        if is_first_build:
-            print("\n" + "=" * 70)
-            print("Compiling diff-surfel-rasterization (first time only)...")
-            print("This will take 2-5 minutes.")
-            print("=" * 70 + "\n")
+        print("\n" + "=" * 70)
+        print("Compiling diff-surfel-rasterization (first time only)...")
+        print("This will take 2-5 minutes.")
+        print("=" * 70 + "\n")
 
         try:
             extension = load(
-                name="diff_surfel_rasterization_cuda",
+                name=so_name,
                 sources=sources,
                 extra_cflags=extra_cflags,
                 extra_cuda_cflags=extra_cuda_cflags,
                 extra_include_paths=include_dirs,
                 build_directory=build_dir,
-                verbose=is_first_build,
+                verbose=True,
                 with_cuda=True,
             )
-
-            if is_first_build:
-                print("\n✓ Compilation successful! Cached for future use.\n")
-
+            print("\n✓ Compilation successful! Cached for future use.\n")
             return extension
 
         except Exception as e:

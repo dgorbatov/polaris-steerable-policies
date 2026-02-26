@@ -29,6 +29,7 @@ override-dependencies = [
     "torch>=2.9.0", # Change here for different CUDA version
     "torchvision>=0.24.0", # Change here for different CUDA version
 ]
+no-build-isolation-package = ["flatdict"]
 
 [build-system]
 requires = ["hatchling"]
