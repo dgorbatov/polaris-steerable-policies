@@ -1,3 +1,4 @@
+import sys
 import tyro
 import mediapy
 import imageio_ffmpeg
@@ -53,6 +54,8 @@ def main(eval_args: EvalArgs):
         rollouts=eval_args.rollouts,
     )
     rollouts = len(initial_conditions)
+    if eval_args.instruction:
+        language_instruction = eval_args.instruction
     # Resume CSV logging
     run_folder = Path(eval_args.run_folder)
     run_folder.mkdir(parents=True, exist_ok=True)
@@ -85,7 +88,37 @@ def main(eval_args: EvalArgs):
     )
     policy_client.reset()
     print(f" >>> Starting eval job from episode {episode + 1} of {rollouts} <<< ")
+    steer_log_path = run_folder / "steer_log.txt"
+    step = 0
     while True:
+        # Steering prompt: pause every N steps to allow instruction update
+        if eval_args.steer_frequency and step > 0 and step % eval_args.steer_frequency == 0:
+            # Save checkpoint video so far
+            if video:
+                ckpt_path = run_folder / f"episode_{episode}_step_{step}.mp4"
+                mediapy.write_video(ckpt_path, video, fps=15)
+
+            bar.clear()  # pause tqdm so it doesn't overwrite the prompt
+            if video:
+                print(f"  [checkpoint saved: {ckpt_path}]")
+            print(f"\n[Step {step}] Current instruction: '{language_instruction}'")
+            try:
+                import termios
+                # Read directly from /dev/tty so apptainer stdin redirection doesn't matter
+                with open("/dev/tty", "r") as tty:
+                    termios.tcflush(tty, termios.TCIFLUSH)  # discard buffered keypresses
+                    sys.stdout.write("Enter new instruction (blank to keep): ")
+                    sys.stdout.flush()
+                    new_instr = tty.readline().strip()
+                if new_instr:
+                    language_instruction = new_instr
+                    print(f"  → Updated to: '{language_instruction}'")
+                with open(steer_log_path, "a") as f:
+                    f.write(f"episode={episode} step={step} instruction={language_instruction!r}\n")
+            except (EOFError, OSError):
+                pass  # no terminal available (SLURM batch), continue silently
+            bar.refresh()  # restore tqdm bar
+
         action, viz = policy_client.infer(obs, language_instruction)
         if viz is not None:
             video.append(viz)
@@ -93,9 +126,11 @@ def main(eval_args: EvalArgs):
             torch.tensor(action).reshape(1, -1), expensive=policy_client.rerender
         )
 
+        step += 1
         bar.update(1)
         if term[0] or trunc[0] or bar.n >= horizon:
             policy_client.reset()
+            step = 0
 
             # Save video and metadata
             filename = run_folder / f"episode_{episode}.mp4"
