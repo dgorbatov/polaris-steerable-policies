@@ -15,6 +15,7 @@ Usage:
 
 Endpoints:
     POST /predict   – run one inference step
+    POST /reset     – clear per-episode image history
     GET  /health    – {"status":"ok"} when model is ready
 """
 
@@ -29,7 +30,16 @@ import numpy as np
 from PIL import Image
 
 # ── Mutable state dict ────────────────────────────────────────────────────────
-_state: dict = {"vla": None, "unnorm_key": "bridge_orig", "trace_log": None}
+_state: dict = {
+    "vla": None,
+    "unnorm_key": "bridge_orig",
+    "trace_log": None,
+    "checkpoint": "",
+    "replay_images": [],   # per-episode list of preprocessed (H,W,3) uint8 numpy arrays
+    "obs_history": 1,
+    "image_size": 224,
+    "center_crop": True,
+}
 
 
 def _trace(msg: str) -> None:
@@ -56,10 +66,40 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024  # 32 MB
 
 
+# ── Image preprocessing ───────────────────────────────────────────────────────
+
+def _preprocess_image(img_np: np.ndarray, resize_size: int) -> np.ndarray:
+    """Replicate Bridge-dataset preprocessing: JPEG encode/decode + two-stage lanczos resize.
+
+    Identical to maniskill_utils.get_maniskill_img (which mirrors simpler_utils.get_simpler_img).
+    TF is available in maniskill_vla.sif.
+    """
+    import tensorflow as tf
+    IMAGE_BASE_SIZE = 128
+    image = tf.image.encode_jpeg(img_np)
+    image = tf.io.decode_image(image, expand_animations=False, dtype=tf.uint8)
+    image = tf.image.resize(
+        image, (IMAGE_BASE_SIZE, IMAGE_BASE_SIZE), method="lanczos3", antialias=True
+    )
+    image = tf.image.resize(image, (resize_size, resize_size), method="lanczos3", antialias=True)
+    image = tf.cast(tf.clip_by_value(tf.round(image), 0, 255), tf.uint8)
+    return image.numpy()
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
     loaded = _state["vla"] is not None
     return jsonify({"status": "ok", "model_loaded": loaded, "pid": os.getpid()})
+
+
+@app.post("/reset")
+def reset_episode():
+    """Clear per-episode image history. Call at the start of each new episode."""
+    _state["replay_images"].clear()
+    _trace("Episode history cleared")
+    return jsonify({"status": "ok"})
 
 
 @app.post("/predict")
@@ -74,18 +114,36 @@ def predict():
 
     try:
         img_bytes = base64.b64decode(data["image_b64"])
-        image = Image.open(BytesIO(img_bytes)).convert("RGB")
+        img_pil = Image.open(BytesIO(img_bytes)).convert("RGB")
+        img_np = np.array(img_pil, dtype=np.uint8)
     except Exception as exc:
         return jsonify({"detail": f"Bad image: {exc}"}), 400
 
     instruction = data.get("instruction", "")
     unnorm_key = data.get("unnorm_key") or _state["unnorm_key"]
 
-    import torch
-    with torch.inference_mode():
-        action, _ = vla.predict_action(image, instruction, unnorm_key=unnorm_key)
+    # ── Preprocess: Bridge-dataset JPEG+lanczos pipeline (identical to training time) ──
+    preprocessed = _preprocess_image(img_np, _state["image_size"])
+    _state["replay_images"].append(preprocessed)
 
-    action_list = np.asarray(action, dtype=np.float32).flatten().tolist()
+    # ── Build observation history (pad with first frame if needed) ──
+    obs_history = _state["obs_history"]
+    image_history = _state["replay_images"][-obs_history:]
+    if len(image_history) < obs_history:
+        pad = [_state["replay_images"][0]] * (obs_history - len(image_history))
+        image_history = pad + image_history
+
+    # ── Run VLA (PIL conversion + center crop + predict_action, identical to run_maniskill_eval.py) ──
+    from robot.openvla_utils import get_prismatic_vla_action
+    import torch
+    observation = {"full_image": image_history}
+    with torch.inference_mode():
+        action = get_prismatic_vla_action(
+            vla, None, _state["checkpoint"], observation, instruction, unnorm_key,
+            center_crop=_state["center_crop"],
+        )
+
+    action_list = np.asarray(action, dtype=np.float32).flatten().tolist()  # get_prismatic_vla_action returns ndarray
     latency = (time.perf_counter() - t0) * 1000.0
     _trace(f"action={action_list}  latency={latency:.1f}ms")
 
@@ -107,12 +165,29 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--trace-log", default=None,
                         help="Path to a trace log file")
+    parser.add_argument("--obs-history", type=int, default=1,
+                        help="Observation history length (default: 1)")
+    parser.add_argument("--image-size", type=int, default=224,
+                        help="Image resize target for preprocessing (default: 224)")
+    parser.add_argument("--center-crop", dest="center_crop", action="store_true",
+                        help="Apply center crop augmentation (default: on)")
+    parser.add_argument("--no-center-crop", dest="center_crop", action="store_false",
+                        help="Disable center crop augmentation")
+    parser.set_defaults(center_crop=True)
     args = parser.parse_args()
 
     _state["unnorm_key"] = args.unnorm_key
     _state["trace_log"] = args.trace_log
+    _state["checkpoint"] = args.checkpoint
+    _state["obs_history"] = args.obs_history
+    _state["image_size"] = args.image_size
+    _state["center_crop"] = args.center_crop
 
-    _trace(f"main() started, checkpoint={args.checkpoint}, port={args.port}")
+    _trace(
+        f"main() started, checkpoint={args.checkpoint}, port={args.port}, "
+        f"obs_history={args.obs_history}, image_size={args.image_size}, "
+        f"center_crop={args.center_crop}"
+    )
 
     # Make prismatic/ importable
     if args.repo not in sys.path:
@@ -138,9 +213,13 @@ def main():
     _trace("Cast and move done")
 
     _trace("Running warmup inference ...")
-    dummy_img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
+    from robot.openvla_utils import get_prismatic_vla_action
+    dummy_obs = {"full_image": [np.zeros((224, 224, 3), dtype=np.uint8)]}
     with torch.inference_mode():
-        test_action, _ = vla.predict_action(dummy_img, "test", unnorm_key=args.unnorm_key)
+        test_action = get_prismatic_vla_action(
+            vla, None, args.checkpoint, dummy_obs, "test", args.unnorm_key,
+            center_crop=args.center_crop,
+        )
     _trace(f"Warmup done. Action shape: {np.asarray(test_action).shape}")
 
     _state["vla"] = vla

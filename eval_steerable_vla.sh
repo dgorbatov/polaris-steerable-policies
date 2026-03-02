@@ -16,6 +16,7 @@
 #
 # Override defaults via --export, e.g.:
 #   sbatch --export=ALL,EVAL_ENV=DROID-FoodBussing eval_steerable_vla.sh
+#   sbatch --export=ALL,EVAL_ENV=WIDOWX-FoodBussing eval_steerable_vla.sh
 
 set -e
 echo "=== PolaRiS Steerable-VLA Evaluation ==="
@@ -40,7 +41,8 @@ set -a; source "${SVLA_REPO}/.env"; set +a
 
 # ── Eval settings ──────────────────────────────────────────────────────────────
 POLICY_PORT="${POLICY_PORT:-8001}"
-EVAL_ENV="${EVAL_ENV:-DROID-FoodBussing}"
+EVAL_ENV="${EVAL_ENV:-WIDOWX-FoodBussing}"
+POLICY_CLIENT="${POLICY_CLIENT:-WidowXJointPos}"
 RUN_FOLDER="${RUN_FOLDER:-${POLARIS_DIR}/runs/eval_svla_$(date +%Y%m%d_%H%M%S)}"
 EVAL_ARGS="${EVAL_ARGS:-}"
 
@@ -48,6 +50,7 @@ echo "Checkpoint:   ${SVLA_CHECKPOINT}"
 echo "Unnorm key:   ${SVLA_UNNORM_KEY}"
 echo "Server port:  ${POLICY_PORT}"
 echo "Environment:  ${EVAL_ENV}"
+echo "Policy client: ${POLICY_CLIENT}"
 echo "Run folder:   ${RUN_FOLDER}"
 mkdir -p "${RUN_FOLDER}"
 
@@ -126,7 +129,7 @@ echo "=== Server log tail at startup ==="
 tail -10 "${SERVER_LOG}" 2>/dev/null || echo "(no server log)"
 
 # ── Step 3: Run the PolaRiS evaluator (octi-lab-base.sif) ────────────────────
-echo "=== Running PolaRiS evaluator (SteerableVLA client) ==="
+echo "=== Running PolaRiS evaluator (${POLICY_CLIENT} client) ==="
 VENV=${POLARIS_DIR}/.venv
 CUDA_HOME_SYNTH=${POLARIS_DIR}/.cuda_home
 
@@ -146,7 +149,7 @@ apptainer exec \
         cd ${POLARIS_DIR}
         ${UV} run scripts/eval.py \
             --environment ${EVAL_ENV} \
-            --policy.client SteerableVLA \
+            --policy.client ${POLICY_CLIENT} \
             --policy.host 127.0.0.1 \
             --policy.port ${POLICY_PORT} \
             --run-folder ${RUN_FOLDER} \

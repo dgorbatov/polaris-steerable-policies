@@ -3,6 +3,7 @@ from polaris.environments.manager_based_rl_splat_environment import (
     ManagerBasedRLSplatEnv,
 )
 from polaris.environments.droid_cfg import EnvCfg as DroidCfg
+from polaris.environments.widowx_cfg import EnvCfg as WidowXCfg
 from isaaclab.envs import ManagerBasedRLEnv
 
 # Import rubric system
@@ -130,6 +131,32 @@ gym.register(
                 checkers.reach("tape_00", threshold=0.2),
                 (checkers.lift("tape_00", threshold=0.04), [0]),
                 (checkers.is_within_xy("tape_00", "container_02", percent_threshold=0.8), [1]),
+            ]
+        ),
+    },
+)
+
+
+# =============================================================================
+# WidowX Environments
+# =============================================================================
+
+gym.register(
+    id="WIDOWX-FoodBussing",
+    entry_point=ManagerBasedRLSplatEnv,
+    disable_env_checker=True,
+    order_enforce=False,
+    kwargs={
+        "env_cfg_entry_point": WidowXCfg,
+        "usd_file": str(DATA_PATH / "food_bussing/scene.usda"),
+        "rubric": Rubric(
+            criteria=[
+                checkers.reach("ice_cream_", threshold=0.2),
+                checkers.reach("grapes", threshold=0.2),
+                (checkers.lift("ice_cream_", threshold=0.06), [0]),
+                (checkers.lift("grapes", threshold=0.06), [1]),
+                (checkers.is_within_xy("ice_cream_", "bowl", percent_threshold=0.8, gripper_joint_name="left_finger"), [2]),
+                (checkers.is_within_xy("grapes", "bowl", percent_threshold=0.8, gripper_joint_name="left_finger"), [3]),
             ]
         ),
     },

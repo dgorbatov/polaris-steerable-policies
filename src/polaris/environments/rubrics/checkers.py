@@ -32,7 +32,7 @@ def lift(obj_name, threshold=0.05, default_height=None):
     return checker
 
 
-def is_within_xy(object1, object2, percent_threshold=0.5, open_finger_threshold=0.1):
+def is_within_xy(object1, object2, percent_threshold=0.5, open_finger_threshold=0.1, gripper_joint_name="finger_joint"):
     """
     Check if object1 is inside object2.
     """
@@ -41,7 +41,7 @@ def is_within_xy(object1, object2, percent_threshold=0.5, open_finger_threshold=
         # ee should be open
         stage = get_context().get_stage()
         finger_joint = env.scene["robot"].data.joint_pos[0][
-            env.scene["robot"].data.joint_names.index("finger_joint")
+            env.scene["robot"].data.joint_names.index(gripper_joint_name)
         ]
         if finger_joint >= open_finger_threshold:
             return False

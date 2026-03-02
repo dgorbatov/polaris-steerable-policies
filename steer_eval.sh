@@ -10,7 +10,8 @@
 # Options:
 #   --steer-frequency N    Prompt every N steps (default: 50)
 #   --rollouts N           Number of episodes (default: 1)
-#   --environment ENV      IsaacLab env name (default: DROID-FoodBussing)
+#   --environment ENV      IsaacLab env name (default: WIDOWX-FoodBussing)
+#   --policy-client NAME   Policy client name (default: WidowXJointPos)
 #   --port PORT            VLA server port (default: 8001)
 #   --instruction TEXT     Starting language instruction override
 
@@ -19,7 +20,8 @@ set -e
 # ── Defaults ───────────────────────────────────────────────────────────────────
 STEER_FREQUENCY=50
 ROLLOUTS=1
-EVAL_ENV="${EVAL_ENV:-DROID-FoodBussing}"
+EVAL_ENV="${EVAL_ENV:-WIDOWX-FoodBussing}"
+POLICY_CLIENT="${POLICY_CLIENT:-WidowXJointPos}"
 POLICY_PORT="${POLICY_PORT:-8001}"
 INSTRUCTION=""
 
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --steer-frequency) STEER_FREQUENCY="$2"; shift 2 ;;
         --rollouts)        ROLLOUTS="$2";         shift 2 ;;
         --environment)     EVAL_ENV="$2";         shift 2 ;;
+        --policy-client)   POLICY_CLIENT="$2";    shift 2 ;;
         --port)            POLICY_PORT="$2";      shift 2 ;;
         --instruction)     INSTRUCTION="$2";      shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
@@ -58,6 +61,7 @@ echo "=== PolaRiS Interactive Steering Eval ==="
 echo "Node:             $(hostname)"
 echo "Date:             $(date)"
 echo "Environment:      ${EVAL_ENV}"
+echo "Policy client:    ${POLICY_CLIENT}"
 echo "Steer frequency:  every ${STEER_FREQUENCY} steps"
 echo "Rollouts:         ${ROLLOUTS}"
 echo "Port:             ${POLICY_PORT}"
@@ -154,7 +158,7 @@ apptainer exec \
         cd ${POLARIS_DIR}
         ${UV} run scripts/eval.py \
             --environment ${EVAL_ENV} \
-            --policy.client SteerableVLA \
+            --policy.client ${POLICY_CLIENT} \
             --policy.host 127.0.0.1 \
             --policy.port ${POLICY_PORT} \
             --run-folder ${RUN_FOLDER} \

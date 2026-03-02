@@ -63,3 +63,68 @@ NVIDIA_DROID = ArticulationCfg(
         ),
     },
 )
+
+# WidowX 250s (wx250s) - Interbotix 6-DOF arm
+# Joint names are standard Interbotix URDF names — verify against your USD if they differ.
+WIDOWX = ArticulationCfg(
+    prim_path="{ENV_REGEX_NS}/robot",
+    spawn=sim_utils.UsdFileCfg(
+        usd_path=str(DATA_PATH / "widowx/wx250s_processed.usd"),
+        activate_contact_sensors=True,
+        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+            disable_gravity=True,
+            max_depenetration_velocity=5.0,
+        ),
+        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+            enabled_self_collisions=False,
+            solver_position_iteration_count=64,
+            solver_velocity_iteration_count=0,
+        ),
+    ),
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=(0, 0, 0),
+        rot=(1, 0, 0, 0),
+        joint_pos={
+            "waist": 0.0,
+            "shoulder": -np.pi / 9,
+            "elbow": np.pi / 9,
+            "forearm_roll": 0.0,
+            "wrist_angle": 0.0,
+            "wrist_rotate": 0.0,
+            "left_finger": 0.037,    # open  (range [0.015, 0.037])
+            "right_finger": -0.037,  # open  (range [-0.037, -0.015], mirrored)
+            "gripper": 0.0,          # passive joint (exists in USD, not in URDF)
+        },
+    ),
+    soft_joint_pos_limit_factor=1,
+    actuators={
+        "wx_shoulder": ImplicitActuatorCfg(
+            joint_names_expr=["waist", "shoulder", "elbow", "forearm_roll"],
+            effort_limit=3.8,
+            velocity_limit=5.24,
+            stiffness=100.0,
+            damping=20.0,
+        ),
+        "wx_wrist": ImplicitActuatorCfg(
+            joint_names_expr=["wrist_angle", "wrist_rotate"],
+            effort_limit=1.5,
+            velocity_limit=6.60,
+            stiffness=100.0,
+            damping=20.0,
+        ),
+        "gripper": ImplicitActuatorCfg(
+            joint_names_expr=["left_finger", "right_finger"],
+            stiffness=None,
+            damping=None,
+            effort_limit=50.0,
+            velocity_limit=5.0,
+        ),
+        "gripper_passive": ImplicitActuatorCfg(
+            joint_names_expr=["gripper"],
+            stiffness=None,
+            damping=None,
+            effort_limit=50.0,
+            velocity_limit=5.0,
+        ),
+    },
+)
