@@ -60,7 +60,7 @@ class WidowXJointPosClient(InferenceClient):
         self.unnorm_key: Optional[str] = getattr(args, "unnorm_key", None)
 
         self._base_url = f"http://{args.host}:{args.port}"
-        self._http = httpx.Client(timeout=30.0, trust_env=False)
+        self._http = httpx.Client(timeout=120.0, trust_env=False)
 
     @property
     def rerender(self) -> bool:

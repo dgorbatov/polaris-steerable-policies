@@ -56,14 +56,15 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
             }
         }
 
-    def reset(self, object_positions: dict = {}, expensive=True, *args, **kwargs):
+    def reset(self, object_positions: dict | list = {}, expensive=True, *args, **kwargs):
         """
         Reset the environment
 
         Parameters
         ----------
-        object_positions : dict
-            A dictionary mapping object names to their desired poses (position and orientation).
+        object_positions : dict or list[dict]
+            A dictionary (single-env) or list of dicts (multi-env) mapping object names
+            to their desired poses (position and orientation).
         expensive : bool
             Whether to perform expensive (splat) rendering operations.
         """
@@ -73,17 +74,30 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
         if self.rubric:
             self.rubric.reset()
 
-        # Following predefined initial conditions
-        for obj, pose in object_positions.items():
-            print(f"Setting initial condition for {obj} to {pose}")
-            pose = torch.tensor(pose)[None]
-            self.scene[obj].write_root_pose_to_sim(pose)
+        if isinstance(object_positions, list):
+            # Multi-env: list of per-env dicts — stack into batched tensors
+            all_obj_names = set()
+            for ep_positions in object_positions:
+                all_obj_names.update(ep_positions.keys())
+            for obj in all_obj_names:
+                full_poses = self.scene[obj].data.root_pose_w.clone()
+                for i, ep_positions in enumerate(object_positions):
+                    if obj in ep_positions:
+                        full_poses[i] = torch.tensor(ep_positions[obj], device=self.device)
+                self.scene[obj].write_root_pose_to_sim(full_poses)
+        else:
+            # Single-env (legacy): dict
+            for obj, pose in object_positions.items():
+                print(f"Setting initial condition for {obj} to {pose}")
+                pose = torch.tensor(pose)[None]
+                self.scene[obj].write_root_pose_to_sim(pose)
+
         self.sim.render()
         self.scene.update(0)
         obs = (
             self.observation_manager.compute()
         )  # update observation after setting ICs if needed
-        obs["splat"] = self.custom_render(expensive, transform_static=True)
+        obs["splat"] = self.render_all_envs(expensive, transform_static=True)
 
         # Evaluate rubric and add to info
         info.update(self._evaluate_rubric())
@@ -102,22 +116,21 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
             Whether to perform expensive (splat) rendering operations.
         """
         obs, rew, done, trunc, info = super().step(action)
-        obs["splat"] = self.custom_render(expensive)
-        # obs["splat"] = {cam: self.get_robot_from_sim()[cam]["rgb"] for cam in self.get_robot_from_sim()}
+        obs["splat"] = self.render_all_envs(expensive)
 
         # Evaluate rubric and add to info
         info.update(self._evaluate_rubric())
 
         return obs, rew, done, trunc, info
 
-    def custom_render(self, expensive: bool, transform_static: bool = False):
+    def custom_render(self, expensive: bool, env_idx: int = 0, transform_static: bool = False):
         """
-        Render the environment
+        Render a single environment by index.
         """
         if expensive:
-            self.transform_sim_to_splat(transform_static=transform_static)
-            rgb = self.render_splat()
-            mask_and_rgb = self.get_robot_from_sim()
+            self.transform_sim_to_splat(env_idx=env_idx, transform_static=transform_static)
+            rgb = self.render_splat(env_idx=env_idx)
+            mask_and_rgb = self.get_robot_from_sim(env_idx=env_idx)
             for cam in mask_and_rgb:
                 og_img = (
                     rgb[cam] if cam in rgb else np.zeros_like(mask_and_rgb[cam]["rgb"])
@@ -131,13 +144,30 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
             for cam in self.scene.sensors:
                 if isinstance(self.scene.sensors[cam], Camera):
                     rgb[cam] = (
-                        self.scene[cam].data.output["rgb"][0].detach().cpu().numpy()
+                        self.scene[cam].data.output["rgb"][env_idx].detach().cpu().numpy()
                     )
         return rgb
 
+    def render_all_envs(self, expensive: bool, transform_static: bool = False) -> list:
+        """Render all environments, returning a list of per-env obs["splat"] dicts."""
+        return [
+            self.custom_render(expensive, env_idx=i, transform_static=transform_static)
+            for i in range(self.num_envs)
+        ]
+
+    def reset_single(self, env_idx: int, object_positions: dict = {}):
+        """Reset a single environment by index without full env reset."""
+        env_ids = torch.tensor([env_idx], device=self.device)
+        self._reset_idx(env_ids)
+        for obj, pose in object_positions.items():
+            full_poses = self.scene[obj].data.root_pose_w.clone()
+            full_poses[env_idx] = torch.tensor(pose, device=self.device)
+            self.scene[obj].write_root_pose_to_sim(full_poses)
+        self.sim.render()
+        self.scene.update(0)
+
     def setup_splat_world_and_robot_views(self):
         splats = {}
-        self.views = {}
         stage = get_current_stage()
 
         # Allocate splats for all rigid objects in the scene and raytrace semantic tags
@@ -146,16 +176,17 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
             if path.exists():
                 splats[name] = path
             else:
-                # apply semantic tags
-                prim = stage.GetPrimAtPath(f"/World/envs/env_0/scene/{name}")
-                semantic_type = "class"
-                semantic_value = "raytraced"
-                instance_name = f"{semantic_type}_{semantic_value}"
-                sem = Semantics.SemanticsAPI.Apply(prim, instance_name)
-                sem.CreateSemanticTypeAttr()
-                sem.CreateSemanticDataAttr()
-                sem.GetSemanticTypeAttr().Set(semantic_type)
-                sem.GetSemanticDataAttr().Set(semantic_value)
+                # apply semantic tags to all envs
+                for i in range(self.num_envs):
+                    prim = stage.GetPrimAtPath(f"/World/envs/env_{i}/scene/{name}")
+                    semantic_type = "class"
+                    semantic_value = "raytraced"
+                    instance_name = f"{semantic_type}_{semantic_value}"
+                    sem = Semantics.SemanticsAPI.Apply(prim, instance_name)
+                    sem.CreateSemanticTypeAttr()
+                    sem.CreateSemanticDataAttr()
+                    sem.GetSemanticTypeAttr().Set(semantic_type)
+                    sem.GetSemanticDataAttr().Set(semantic_value)
 
         # Setup splat cameras with intrinsics and resolution from sim cameras
         camera_cfg = {}
@@ -181,21 +212,23 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
         self.splat_renderer.init_cameras(camera_cfg)
 
     def setup_splat_robot(self):
-        # Allocate robot splats and views on robot links to track
+        # Allocate robot splats and per-env views on robot links to track
         more_splats = {}
+        self.views = {i: {} for i in range(self.num_envs)}
         robot_asset_path = Path(self.cfg.scene.robot.spawn.usd_path).parent
         for ply in sorted(list(robot_asset_path.glob("SEGMENTED/*.ply"))):
             more_splats[ply.stem] = ply
             sim_path = ply.stem.replace("-", "/")
-            view = GeometryPrim(
-                prim_paths_expr=f"/World/envs/env_0/robot/{sim_path}",
-                reset_xform_properties=False,
-            )
-            print(f"/World/envs/env_0/robot/{sim_path}")
-            self.views[ply.stem] = view
+            for i in range(self.num_envs):
+                view = GeometryPrim(
+                    prim_paths_expr=f"/World/envs/env_{i}/robot/{sim_path}",
+                    reset_xform_properties=False,
+                )
+                print(f"/World/envs/env_{i}/robot/{sim_path}")
+                self.views[i][ply.stem] = view
         self.splat_renderer.add_splats(more_splats)
 
-    def get_robot_from_sim(self):
+    def get_robot_from_sim(self, env_idx: int = 0):
         # TODO: comment this. does this get only robot? objects too?
         ret = {}
         for cam in self.scene.sensors:
@@ -203,21 +236,23 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
                 continue
             base_cam = self.scene[cam]
             mask = (
-                base_cam.data.output["semantic_segmentation"][0].detach().cpu().numpy()
+                base_cam.data.output["semantic_segmentation"][env_idx].detach().cpu().numpy()
             )
-            img = base_cam.data.output["rgb"][0].detach().cpu().numpy()
+            img = base_cam.data.output["rgb"][env_idx].detach().cpu().numpy()
             mask = np.where(mask >= 2, 1, 0)
 
             ret[cam] = {"rgb": img, "mask": mask}
 
         return ret
 
-    def transform_sim_to_splat(self, transform_static=False):
+    def transform_sim_to_splat(self, env_idx: int = 0, transform_static=False):
         """
         Update splat renderer transforms from simulation
 
         Parameters
         ----------
+        env_idx : int
+            Index of the environment to use for pose lookup.
         transform_static : bool
             Whether to also transform static objects (like environment).
         """
@@ -229,13 +264,13 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
             if (
                 "static" not in name or transform_static
             ) and path.exists():  # splat exists
-                pos = self.scene[name].data.root_state_w[0, :3]
-                quat = self.scene[name].data.root_state_w[0, 3:7]
+                pos = self.scene[name].data.root_state_w[env_idx, :3]
+                quat = self.scene[name].data.root_state_w[env_idx, 3:7]
                 all_transforms[name] = (pos, quat)
 
         #  robot - this will only fire if setup_splat_robot has been called otherwise views will be empty
-        for v_name in self.views:
-            view = self.views[v_name]
+        for v_name in self.views[env_idx]:
+            view = self.views[env_idx][v_name]
             pos, quat = view.get_world_poses(usd=False)
             pos, quat = pos.squeeze(), quat.squeeze()
             all_transforms[v_name] = (pos, quat)
@@ -247,8 +282,8 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
         if transform_static:
             cam_extrinsics_dict = {}
             for name in self.splat_renderer.cameras:
-                pos = self.scene[name].data.pos_w[0].detach().cpu().numpy()
-                quat = self.scene[name].data.quat_w_world[0]
+                pos = self.scene[name].data.pos_w[env_idx].detach().cpu().numpy()
+                quat = self.scene[name].data.quat_w_world[env_idx]
 
                 rot = math.matrix_from_quat(quat).detach().cpu().numpy()
                 cam_extrinsics_dict[name] = {"pos": pos, "rot": rot}
@@ -256,13 +291,13 @@ class ManagerBasedRLSplatEnv(ManagerBasedRLEnv):
             if len(self.splat_renderer.pcds) > 0:
                 self.splat_renderer.render(cam_extrinsics_dict)
 
-    def render_splat(self):
+    def render_splat(self, env_idx: int = 0):
         # get camera extrinsics
         cam_extrinsics_dict = {}
         for name in self.splat_renderer.cameras:
             if "wrist" in name:
-                pos = self.scene[name].data.pos_w[0].detach().cpu().numpy()
-                quat = self.scene[name].data.quat_w_world[0]
+                pos = self.scene[name].data.pos_w[env_idx].detach().cpu().numpy()
+                quat = self.scene[name].data.quat_w_world[env_idx]
 
                 rot = math.matrix_from_quat(quat).detach().cpu().numpy()
                 cam_extrinsics_dict[name] = {"pos": pos, "rot": rot}

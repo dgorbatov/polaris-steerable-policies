@@ -14,12 +14,14 @@
 #   --policy-client NAME   Policy client name (default: WidowXJointPos)
 #   --port PORT            VLA server port (default: 8001)
 #   --instruction TEXT     Starting language instruction override
+#   --num-envs N           Number of parallel environments (default: 5)
 
 set -e
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 STEER_FREQUENCY=50
-ROLLOUTS=1
+NUM_ENVS=5
+ROLLOUTS=${NUM_ENVS}  # default: one episode per env
 EVAL_ENV="${EVAL_ENV:-WIDOWX-FoodBussing}"
 POLICY_CLIENT="${POLICY_CLIENT:-WidowXJointPos}"
 POLICY_PORT="${POLICY_PORT:-8001}"
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --policy-client)   POLICY_CLIENT="$2";    shift 2 ;;
         --port)            POLICY_PORT="$2";      shift 2 ;;
         --instruction)     INSTRUCTION="$2";      shift 2 ;;
+        --num-envs)        NUM_ENVS="$2";         shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -64,6 +67,7 @@ echo "Environment:      ${EVAL_ENV}"
 echo "Policy client:    ${POLICY_CLIENT}"
 echo "Steer frequency:  every ${STEER_FREQUENCY} steps"
 echo "Rollouts:         ${ROLLOUTS}"
+echo "Num envs:         ${NUM_ENVS}"
 echo "Port:             ${POLICY_PORT}"
 echo "Run folder:       ${RUN_FOLDER}"
 [[ -n "$INSTRUCTION" ]] && echo "Instruction:      ${INSTRUCTION}"
@@ -114,8 +118,8 @@ echo "Server PID: ${SERVER_PID}"
 
 # ── Step 2: Wait for server ────────────────────────────────────────────────────
 echo ""
-echo "=== Waiting for server (model load + warmup, ~2-3 min) ==="
-MAX_WAIT=1800
+echo "=== Waiting for server (model load + warmup, ~30-40 min on cold disk) ==="
+MAX_WAIT=3600
 ELAPSED=0
 while ! nc -z localhost "${POLICY_PORT}" 2>/dev/null; do
     if [[ "${ELAPSED}" -ge "${MAX_WAIT}" ]]; then
@@ -163,6 +167,7 @@ apptainer exec \
             --policy.port ${POLICY_PORT} \
             --run-folder ${RUN_FOLDER} \
             --rollouts ${ROLLOUTS} \
+            --num-envs ${NUM_ENVS} \
             --steer-frequency ${STEER_FREQUENCY} \
             ${EXTRA_EVAL_ARGS}
     "

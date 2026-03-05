@@ -54,6 +54,7 @@ class EvalArgs:
     instruction: str | None = None  # Override language instruction
     rollouts: int | None = None  # Number of rollouts to evaluate
     steer_frequency: int | None = None  # Prompt for new instruction every N steps
+    num_envs: int = 1  # Number of parallel environments
 
 
 @dataclass

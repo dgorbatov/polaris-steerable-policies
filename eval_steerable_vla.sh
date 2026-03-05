@@ -102,7 +102,7 @@ echo "Steerable-VLA server started with PID ${SERVER_PID}"
 # ── Step 2: Wait for server to be ready ───────────────────────────────────────
 # Port only opens after load + warmup inference complete (see serve_steerable_vla.py)
 echo "=== Waiting for server on port ${POLICY_PORT} ==="
-MAX_WAIT=1800   # 30 min – model load + warmup
+MAX_WAIT=3600   # 60 min – model load alone takes ~28 min on cold disk
 ELAPSED=0
 while ! nc -z localhost "${POLICY_PORT}" 2>/dev/null; do
     if [ "${ELAPSED}" -ge "${MAX_WAIT}" ]; then

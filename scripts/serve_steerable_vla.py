@@ -222,6 +222,13 @@ def main():
         )
     _trace(f"Warmup done. Action shape: {np.asarray(test_action).shape}")
 
+    # Warm up TF preprocessing — `import tensorflow as tf` is deferred inside
+    # _preprocess_image(); triggering it here prevents a >30s stall on the first
+    # real /predict request after Flask starts.
+    _trace("Warming up TF image preprocessing ...")
+    _preprocess_image(np.zeros((224, 224, 3), dtype=np.uint8), args.image_size)
+    _trace("TF preprocessing warmup done")
+
     _state["vla"] = vla
     _trace(f"VLA stored in _state. vla is not None: {_state['vla'] is not None}")
 
