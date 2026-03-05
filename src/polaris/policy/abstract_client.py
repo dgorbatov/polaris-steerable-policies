@@ -60,6 +60,12 @@ class InferenceClient(ABC):
         """
         pass
 
+    def infer_batch(
+        self, obs_list: list[dict], instruction: str,
+    ) -> list[tuple[np.ndarray, np.ndarray | None]]:
+        """Batch inference. Default: sequential infer() calls. Override for true batching."""
+        return [self.infer(obs, instruction) for obs in obs_list]
+
 
 class FakeClient(InferenceClient):
     """

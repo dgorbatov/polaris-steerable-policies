@@ -14,9 +14,10 @@ Usage:
         --port 8001
 
 Endpoints:
-    POST /predict   – run one inference step
-    POST /reset     – clear per-episode image history
-    GET  /health    – {"status":"ok"} when model is ready
+    POST /predict         – single-item inference step
+    POST /predict_batch   – GPU-batched inference (N items → 1 generate() call)
+    POST /reset           – clear per-episode image history
+    GET  /health          – {"status":"ok"} when model is ready
 """
 
 import argparse
@@ -102,6 +103,126 @@ def reset_episode():
     return jsonify({"status": "ok"})
 
 
+def _build_pixel_values_batch(preprocessed_images: list) -> "torch.Tensor | dict":
+    """Apply center-crop + vision backbone image_transform to a list of preprocessed numpy images,
+    returning a batched tensor of shape (B, 3, H, W) — or a dict of such tensors for dual-encoder backbones."""
+    import math
+    import torch
+    from PIL import Image as PILImage
+
+    vla = _state["vla"]
+    image_transform = vla.vision_backbone.get_image_transform()
+    center_crop = _state["center_crop"]
+    sqrt_crop_scale = math.sqrt(0.9)
+
+    pixel_values_list = []
+    for img_np in preprocessed_images:
+        image = PILImage.fromarray(img_np).convert("RGB")
+        if center_crop:
+            from robot.openvla_utils import apply_center_crop
+            temp = np.array(image)
+            temp_cropped = apply_center_crop(
+                temp,
+                t_h=int(sqrt_crop_scale * temp.shape[0]),
+                t_w=int(sqrt_crop_scale * temp.shape[1]),
+            )
+            image = PILImage.fromarray(temp_cropped).resize(image.size, PILImage.Resampling.BILINEAR)
+        pv = image_transform(image)
+        pixel_values_list.append(pv)
+
+    if isinstance(pixel_values_list[0], torch.Tensor):
+        return torch.stack(pixel_values_list).to(vla.device)   # (B, 3, H, W)
+    elif isinstance(pixel_values_list[0], dict):
+        return {k: torch.stack([pv[k] for pv in pixel_values_list]).to(vla.device)
+                for k in pixel_values_list[0]}
+    else:
+        raise ValueError(f"Unexpected pixel_values type: {type(pixel_values_list[0])}")
+
+
+def _build_input_ids(instruction: str, B: int) -> "torch.Tensor":
+    """Build a (B, seq) input_ids tensor for the given instruction."""
+    import torch
+    from transformers import LlamaTokenizerFast, Qwen2TokenizerFast
+
+    vla = _state["vla"]
+    tokenizer = vla.llm_backbone.tokenizer
+
+    instruction = instruction.lower().strip()
+    prompt_builder = vla.get_prompt_builder()
+    prompt_builder.add_turn(role="human", message=instruction)
+    prompt_text = prompt_builder.get_prompt()
+
+    input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(vla.device)  # (1, seq)
+
+    if isinstance(tokenizer, LlamaTokenizerFast):
+        if not torch.all(input_ids[:, -1] == 29871):
+            input_ids = torch.cat(
+                (input_ids, torch.tensor([[29871]], dtype=torch.long, device=vla.device)), dim=1
+            )
+
+    return input_ids.repeat(B, 1)  # (B, seq)
+
+
+def _decode_actions_batch(generated_ids: "torch.Tensor", unnorm_key: str, B: int) -> list[list[float]]:
+    """Decode a batch of generated token IDs into un-normalized action lists."""
+    vla = _state["vla"]
+    action_dim = vla.get_action_dim(unnorm_key)
+    action_norm_stats = vla.get_action_stats(unnorm_key)
+    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
+    action_high = np.array(action_norm_stats["q99"])
+    action_low = np.array(action_norm_stats["q01"])
+
+    results = []
+    for b in range(B):
+        token_ids = generated_ids[b, -action_dim:].cpu().numpy()
+        normalized = vla.action_tokenizer.decode_token_ids_to_actions(token_ids)
+        actions = np.where(
+            mask,
+            0.5 * (normalized + 1) * (action_high - action_low) + action_low,
+            normalized,
+        )
+        results.append(np.asarray(actions, dtype=np.float32).flatten().tolist())
+    return results
+
+
+def _predict_single(data: dict) -> dict:
+    """Run one inference step for a single observation dict. Returns {"action": [...], "latency_ms": ...}."""
+    import torch
+    from robot.openvla_utils import get_prismatic_vla_action
+
+    t0 = time.perf_counter()
+
+    try:
+        img_bytes = base64.b64decode(data["image_b64"])
+        img_pil = Image.open(BytesIO(img_bytes)).convert("RGB")
+        img_np = np.array(img_pil, dtype=np.uint8)
+    except Exception as exc:
+        raise ValueError(f"Bad image: {exc}") from exc
+
+    instruction = data.get("instruction", "")
+    unnorm_key = data.get("unnorm_key") or _state["unnorm_key"]
+
+    preprocessed = _preprocess_image(img_np, _state["image_size"])
+    _state["replay_images"].append(preprocessed)
+
+    obs_history = _state["obs_history"]
+    image_history = _state["replay_images"][-obs_history:]
+    if len(image_history) < obs_history:
+        pad = [_state["replay_images"][0]] * (obs_history - len(image_history))
+        image_history = pad + image_history
+
+    observation = {"full_image": image_history}
+    with torch.inference_mode():
+        action = get_prismatic_vla_action(
+            _state["vla"], None, _state["checkpoint"], observation, instruction, unnorm_key,
+            center_crop=_state["center_crop"],
+        )
+
+    action_list = np.asarray(action, dtype=np.float32).flatten().tolist()
+    latency = (time.perf_counter() - t0) * 1000.0
+    return {"action": action_list, "latency_ms": latency}
+
+
 @app.post("/predict")
 def predict():
     vla = _state["vla"]
@@ -109,45 +230,65 @@ def predict():
     if vla is None:
         return jsonify({"detail": "Model not loaded yet"}), 503
 
-    t0 = time.perf_counter()
     data = flask_request.get_json(force=True)
-
     try:
-        img_bytes = base64.b64decode(data["image_b64"])
-        img_pil = Image.open(BytesIO(img_bytes)).convert("RGB")
-        img_np = np.array(img_pil, dtype=np.uint8)
-    except Exception as exc:
-        return jsonify({"detail": f"Bad image: {exc}"}), 400
+        result = _predict_single(data)
+    except ValueError as exc:
+        return jsonify({"detail": str(exc)}), 400
 
-    instruction = data.get("instruction", "")
-    unnorm_key = data.get("unnorm_key") or _state["unnorm_key"]
+    _trace(f"action={result['action']}  latency={result['latency_ms']:.1f}ms")
+    return jsonify(result)
 
-    # ── Preprocess: Bridge-dataset JPEG+lanczos pipeline (identical to training time) ──
-    preprocessed = _preprocess_image(img_np, _state["image_size"])
-    _state["replay_images"].append(preprocessed)
 
-    # ── Build observation history (pad with first frame if needed) ──
-    obs_history = _state["obs_history"]
-    image_history = _state["replay_images"][-obs_history:]
-    if len(image_history) < obs_history:
-        pad = [_state["replay_images"][0]] * (obs_history - len(image_history))
-        image_history = pad + image_history
-
-    # ── Run VLA (PIL conversion + center crop + predict_action, identical to run_maniskill_eval.py) ──
-    from robot.openvla_utils import get_prismatic_vla_action
+@app.post("/predict_batch")
+def predict_batch():
+    """GPU-batched inference: one generate() call for all items in the batch."""
     import torch
-    observation = {"full_image": image_history}
+    from prismatic.models.vlas.openvla import PrismaticVLM
+
+    vla = _state["vla"]
+    if vla is None:
+        return jsonify({"detail": "Model not loaded yet"}), 503
+
+    items = flask_request.get_json(force=True).get("items", [])
+    if not items:
+        return jsonify({"actions": []})
+
+    t0 = time.perf_counter()
+    B = len(items)
+    unnorm_key = items[0].get("unnorm_key") or _state["unnorm_key"]
+    instruction = items[0].get("instruction", "")
+
+    # Preprocess all images through TF pipeline
+    preprocessed_images = []
+    for item in items:
+        try:
+            img_bytes = base64.b64decode(item["image_b64"])
+            img_pil = Image.open(BytesIO(img_bytes)).convert("RGB")
+            img_np = np.array(img_pil, dtype=np.uint8)
+        except Exception as exc:
+            return jsonify({"detail": f"Bad image: {exc}"}), 400
+        preprocessed_images.append(_preprocess_image(img_np, _state["image_size"]))
+
+    # Build batched tensors
+    pixel_values = _build_pixel_values_batch(preprocessed_images)  # (B, 3, H, W)
+    input_ids = _build_input_ids(instruction, B)                   # (B, seq)
+
+    action_dim = vla.get_action_dim(unnorm_key)
+    autocast_dtype = vla.llm_backbone.half_precision_dtype
+
     with torch.inference_mode():
-        action = get_prismatic_vla_action(
-            vla, None, _state["checkpoint"], observation, instruction, unnorm_key,
-            center_crop=_state["center_crop"],
-        )
+        with torch.autocast("cuda", dtype=autocast_dtype, enabled=vla.enable_mixed_precision_training):
+            generated_ids = super(PrismaticVLM, vla).generate(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                max_new_tokens=action_dim,
+            )
 
-    action_list = np.asarray(action, dtype=np.float32).flatten().tolist()  # get_prismatic_vla_action returns ndarray
+    actions = _decode_actions_batch(generated_ids, unnorm_key, B)
     latency = (time.perf_counter() - t0) * 1000.0
-    _trace(f"action={action_list}  latency={latency:.1f}ms")
-
-    return jsonify({"action": action_list, "latency_ms": latency})
+    _trace(f"/predict_batch B={B} latency={latency:.1f}ms")
+    return jsonify({"actions": actions})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

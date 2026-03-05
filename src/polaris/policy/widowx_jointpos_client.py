@@ -115,3 +115,46 @@ class WidowXJointPosClient(InferenceClient):
         viz = np.concatenate([ext_small, wrist_small], axis=1)
 
         return action, viz
+
+    def infer_batch(
+        self, obs_list: list[dict], instruction: str,
+    ) -> list[tuple[np.ndarray, np.ndarray | None]]:
+        """Batch inference: single HTTP round-trip via /predict_batch."""
+        if len(obs_list) == 1:
+            return [self.infer(obs_list[0], instruction)]
+
+        items = []
+        images_for_viz = []  # (ext_img, wrist_img) per obs
+        for obs in obs_list:
+            ext_img = _to_numpy_uint8(obs["splat"]["external_cam"])
+            wrist_img = _to_numpy_uint8(obs["splat"]["wrist_cam"])
+            robot_state = obs["policy"]
+            joint_pos = (
+                robot_state["arm_joint_pos"].clone().detach().cpu().float().numpy()[0]
+            )
+            item = {
+                "image_b64": _encode_image_b64(ext_img),
+                "instruction": instruction,
+                "joint_positions": joint_pos.tolist(),
+            }
+            if self.unnorm_key is not None:
+                item["unnorm_key"] = self.unnorm_key
+            items.append(item)
+            images_for_viz.append((ext_img, wrist_img))
+
+        resp = self._http.post(f"{self._base_url}/predict_batch", json={"items": items})
+        if resp.status_code >= 400:
+            logger.error("Server returned %d: %s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+        raw_actions = resp.json()["actions"]
+
+        results = []
+        for action7_list, (ext_img, wrist_img) in zip(raw_actions, images_for_viz):
+            action7 = np.asarray(action7_list, dtype=np.float32)
+            gripper_binary = np.float32(1.0 if action7[6] > 0.5 else 0.0)
+            action = np.append(action7[:6], gripper_binary).astype(np.float32)
+            ext_small = cv2.resize(ext_img, (224, 224)).astype(np.uint8)
+            wrist_small = cv2.resize(wrist_img, (224, 224)).astype(np.uint8)
+            viz = np.concatenate([ext_small, wrist_small], axis=1)
+            results.append((action, viz))
+        return results

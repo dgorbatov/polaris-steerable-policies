@@ -187,19 +187,36 @@ def main(eval_args: EvalArgs):
         remaining = rollouts - start_episode
         print(f" >>> Starting multi-env eval: {num_envs} envs, {remaining} episodes remaining <<< ")
 
+        episode_bar = tqdm.tqdm(total=remaining, desc="Episodes", unit="ep", position=0, leave=True)
+        env_bars = [
+            tqdm.tqdm(
+                total=horizon,
+                desc=f"Env {i} | ep {env_episode[i]}",
+                position=i + 1,
+                leave=False,
+                disable=not env_active[i],
+            )
+            for i in range(num_envs)
+        ]
+
         while any(env_active):
-            # Collect actions for all active envs
+            # Batch inference across all active envs (single round-trip)
+            active_indices = [i for i in range(num_envs) if env_active[i]]
+            obs_list = [
+                {
+                    "splat": obs["splat"][i],
+                    **({"policy": {k: v[i:i+1] for k, v in obs["policy"].items()}} if "policy" in obs else {}),
+                }
+                for i in active_indices
+            ]
+            results = policy_client.infer_batch(obs_list, language_instruction)
+
             actions = [None] * num_envs
-            for i in range(num_envs):
-                if not env_active[i]:
-                    continue
-                obs_i = {"splat": obs["splat"][i]}
-                if "policy" in obs:
-                    obs_i["policy"] = {k: v[i:i+1] for k, v in obs["policy"].items()}
-                action_i, viz_i = policy_client.infer(obs_i, language_instruction)
+            for i, (action_i, viz_i) in zip(active_indices, results):
                 actions[i] = action_i
                 if viz_i is not None:
                     env_video[i].append(viz_i)
+                env_bars[i].update(1)
 
             # Fill inactive envs with zeros matching the active action shape
             first_action = next(a for a in actions if a is not None)
@@ -236,6 +253,9 @@ def main(eval_args: EvalArgs):
                         )
                     print(f"Episode {ep_idx} finished. Episode length: {env_step[i]}")
 
+                    env_bars[i].close()
+                    episode_bar.update(1)
+
                     if next_episode < rollouts:
                         env_episode[i] = next_episode
                         next_episode += 1
@@ -244,8 +264,18 @@ def main(eval_args: EvalArgs):
                         )
                         env_video[i] = []
                         env_step[i] = 0
+                        env_bars[i] = tqdm.tqdm(
+                            total=horizon,
+                            desc=f"Env {i} | ep {env_episode[i]}",
+                            position=i + 1,
+                            leave=False,
+                        )
                     else:
                         env_active[i] = False
+
+        episode_bar.close()
+        for bar in env_bars:
+            bar.close()
 
     env.close()
     simulation_app.close()
