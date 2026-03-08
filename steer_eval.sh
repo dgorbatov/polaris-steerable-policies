@@ -20,7 +20,7 @@ set -e
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 STEER_FREQUENCY=50
-NUM_ENVS=5
+NUM_ENVS=15
 ROLLOUTS=${NUM_ENVS}  # default: one episode per env
 EVAL_ENV="${EVAL_ENV:-WIDOWX-FoodBussing}"
 POLICY_CLIENT="${POLICY_CLIENT:-WidowXJointPos}"
